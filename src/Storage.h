@@ -567,8 +567,10 @@ RocksDB: "meta" √
 RocksDB: "headers" √
   Purpose:  Data store for headers.
   Key: Bucket number (VarIntBE encoding)
-  Data layout:  Each header is 80 bytes and they are laid out 1 after the other in buckets of size 8. See
-                DBRecordArray.cpp for how this data layout works.
+  Data layout:  Each record is 164 bytes (the max header size) and they are laid out 1 after the other in
+                buckets of size 8. Legacy 80-byte headers are zero-padded out to the record size; a header's
+                real length is recoverable from the top bit of its own version field. See DBRecordArray.cpp
+                for how this data layout works.
 
 RocksDB: "txnum2txhash" √
   Purpose:  Mapping of TxNum -> TxId(hash)
