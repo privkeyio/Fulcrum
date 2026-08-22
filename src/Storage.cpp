@@ -90,6 +90,22 @@ UndoInfoMissing::~UndoInfoMissing() {} // weak vtable warning suppression
 HistoryTooLarge::~HistoryTooLarge() {} // weak vtable warning suppression
 
 namespace {
+    /// Headers live in a fixed-stride record array, but with the BLAKE2b hardfork they are no longer all the
+    /// same size. Short (legacy, 80-byte) headers are therefore zero-padded out to the max header size on the
+    /// way in, and trimmed back on the way out. Each header's real length is recoverable from its own version
+    /// field, so no extra metadata is needed.
+    QByteArray PadHeaderForDB(const QByteArray &hdr) {
+        QByteArray ret = hdr;
+        if (const auto pad = BTC::GetBlockHeaderSizeV2() - ret.size(); pad > 0)
+            ret.append(QByteArray(pad, '\0'));
+        return ret;
+    }
+    QByteArray & TrimHeaderFromDB(QByteArray &rec) {
+        if (const auto sz = BTC::GetBlockHeaderSize(rec); sz > 0 && rec.size() > sz)
+            rec.resize(sz);
+        return rec;
+    }
+
     /// Encapsulates the 'meta' db table
     struct Meta {
         static constexpr uint32_t kCurrentVersion = 0x4u;
@@ -1138,7 +1154,7 @@ struct Storage::Pvt
 
     Pvt(const Pvt &) = delete;
 
-    static constexpr int blockHeaderSize() noexcept { return BTC::GetBlockHeaderSize(); }
+    static constexpr int blockHeaderSize() noexcept { return BTC::GetBlockHeaderSizeV2(); } // storage stride; short (legacy) headers are zero-padded to this
 
     /* NOTE: If taking multiple locks, all locks should be taken in the order they are declared, to avoid deadlocks. */
 
@@ -1726,7 +1742,10 @@ void Storage::openOrCreateDB(bool bulkLoad)
     p->db.headersDRA = std::make_unique<DBRecordArray>(*p->db, *p->db.headers,
                                                        /* recSz = */ size_t(p->blockHeaderSize()),
                                                        /* bucketNItems = */ 8,
-                                                       /* magic = */ 0x00f026a1); // may throw
+                                                       // magic bumped from 0x00f026a1 when the record size grew
+                                                       // from 80 to 164 for BLAKE2b headers; an older headers
+                                                       // table must fail to open rather than be misread.
+                                                       /* magic = */ 0x00f026a2); // may throw
 
 
     Debug() << "DB opened in " << (!bulkLoad ? "normal" : "\"bulk load\"") << " mode";
@@ -2119,7 +2138,7 @@ bool Storage::checkFulc1xUpgradeDB()
                         std::vector<QByteArray> res;
                         res.reserve(q.size());
                         for (const auto & header : q)
-                            totalBytes += res.emplace_back(BTC::HashRev(header).right(kRpaShortBlockHashLen)).size();
+                            totalBytes += res.emplace_back(BTC::HeaderHashRev(header).right(kRpaShortBlockHashLen)).size();
                         std::unique_lock g(lock);
                         if (shortHashes.empty()) shortHashes.swap(res);
                         else shortHashes.insert(shortHashes.end(), res.begin(), res.end());
@@ -2261,7 +2280,7 @@ void Storage::checkUpgradeDBVersion()
         if (BTC::coinFromName(p->meta.coin) == BTC::Coin::BCH && p->meta.version < Meta::kMinBCHUpgrade9Version) {
             // Get the latest header to detect if we are after the activation time
             const Header hdr = headerVerifier().first.lastHeaderProcessed().second;
-            if (hdr.size() == BTC::GetBlockHeaderSize()) {
+            if (BTC::IsHeaderSizeOk(hdr)) {
                 const auto bhdr = [&hdr] {
                     try {
                         return BTC::Deserialize<bitcoin::CBlockHeader>(hdr, 0, false, false, true, true);
@@ -2585,7 +2604,7 @@ auto Storage::latestTip(Header *hdrOut) const -> std::pair<int, HeaderHash> {
         if (hdrOut) hdrOut->clear();
     } else {
         // .ret now has the actual header but we want the hash
-        ret.second = BTC::HashRev(ret.second);
+        ret.second = BTC::HeaderHashRev(ret.second);
     }
     return ret;
 }
@@ -2641,7 +2660,7 @@ void Storage::appendHeader(rocksdb::WriteBatch &batch, const Header &h, BlockHei
     if (height != targetHeight) [[unlikely]]
         throw InternalError(QString("Bad use of appendHeader -- expected height %1, got height %2").arg(targetHeight).arg(height));
     QString err;
-    const auto res = ctx.append(h, &err);
+    const auto res = ctx.append(PadHeaderForDB(h), &err);
     if (!err.isEmpty()) [[unlikely]]
         throw DatabaseError(QString("Failed to append header %1: %2").arg(height).arg(err));
     else if (!res || p->db.headersDRA->numRecords() != height + 1u) [[unlikely]]
@@ -2669,7 +2688,7 @@ auto Storage::headerForHeight(BlockHeight height, QString *err, HeaderHash *hash
         if (hashOut) *hashOut = tipHash;
     } else if (int(height) < tipHeight && int(height) >= 0) {
         ret = headerForHeight_nolock(height, err);
-        if (ret && hashOut) *hashOut = BTC::HashRev(*ret);
+        if (ret && hashOut) *hashOut = BTC::HeaderHashRev(*ret);
     } else if (err) { *err = QStringLiteral("Height %1 is out of range").arg(height); }
     return ret;
 }
@@ -2680,6 +2699,7 @@ auto Storage::headerForHeight_nolock(BlockHeight height, QString *err) const -> 
     try {
         QString err1;
         ret.emplace( p->db.headersDRA->readRecord(height, &err1) );
+        if (ret) TrimHeaderFromDB(*ret);
         if (!err1.isEmpty()) {
             ret.reset();
             throw DatabaseError(QString("failed to read header %1: %2").arg(height).arg(err1));
@@ -2694,6 +2714,7 @@ auto Storage::headersFromHeight_nolock_nocheck(BlockHeight height, unsigned num,
 {
     if (err) err->clear();
     std::vector<Header> ret = p->db.headersDRA->readRecords(height, num, err);
+    for (auto &rec : ret) TrimHeaderFromDB(rec);
 
     if (ret.size() != num && err && err->isEmpty())
         *err = "short header count returned from headers file";
@@ -2747,7 +2768,7 @@ void Storage::loadCheckHeadersInDB()
 
             auto [verif, lock] = headerVerifier();
             // set genesis hash
-            p->genesisHash = BTC::HashRev(hVec.front());
+            p->genesisHash = BTC::HeaderHashRev(hVec.front());
 
             err.clear();
             // read db
@@ -3864,7 +3885,7 @@ void Storage::addBlock(PreProcessedBlockPtr ppb, bool saveUndo, unsigned nReserv
             // save the last of the undo info, if in saveUndo mode
             if (undo) {
                 const Tic t0;
-                undo->hash = BTC::HashRev(rawHeader);
+                undo->hash = BTC::HeaderHashRev(rawHeader);
                 undo->scriptHashes = Util::keySet<decltype (undo->scriptHashes)>(ppb->hashXAggregated);
                 static const QString errPrefix("Error saving undo info to undo db");
 
@@ -3915,7 +3936,7 @@ void Storage::addBlock(PreProcessedBlockPtr ppb, bool saveUndo, unsigned nReserv
 
             if (ppb->height == 0) [[unlikely]] {
                 // update genesis hash now if block 0 -- this info is used by rpc method server.features
-                p->genesisHash = BTC::HashRev(rawHeader); // this variable is guarded by p->headerVerifierLock
+                p->genesisHash = BTC::HeaderHashRev(rawHeader); // this variable is guarded by p->headerVerifierLock
             }
 
             saveUtxoCt(batch);
@@ -4042,7 +4063,8 @@ BlockHeight Storage::undoLatestBlock(bool notifySubs)
         p->recentBlockTxHashes.clear(); // these are no longer relevant if undoing
 
         const auto [tip, header] = p->headerVerifier.lastHeaderProcessed();
-        if (tip <= 0 || header.length() != p->blockHeaderSize()) throw UndoInfoMissing("No header to undo");
+        // NB: compare against the real header size, not the storage stride -- a legacy header is 80 bytes
+        if (tip <= 0 || !BTC::IsHeaderSizeOk(header)) throw UndoInfoMissing("No header to undo");
         prevHeight = unsigned(tip-1);
         Header prevHeader;
         {
@@ -4060,7 +4082,7 @@ BlockHeight Storage::undoLatestBlock(bool notifySubs)
         auto & undo = *undoOpt; // non-const because we swap out its scripthashes potentially below if notifySubs == true
 
         // ensure undo info sanity
-        if (!undo.isValid() || undo.height != unsigned(tip) || undo.hash != BTC::HashRev(header)
+        if (!undo.isValid() || undo.height != unsigned(tip) || undo.hash != BTC::HeaderHashRev(header)
             || prevHeight+1 >= p->blkInfos.size() || p->blkInfos.empty() || p->blkInfos.back() != undo.blkInfo)
             throw DatabaseFormatError(QString("The undo information for height %1 was successfully retrieved from the "
                                               "database, but it failed an internal consistency check.").arg(tip));
@@ -4890,7 +4912,7 @@ auto Storage::getFirstUse(const HashX & hashX) const -> std::optional<FirstUse>
             const BlockHeight blockHeight = heightForTxNum(txNum).value(); // may throw
             return FirstUse(hashForTxNum(txNum).value(), /* .txHash */
                             blockHeight, /* .height */
-                            BTC::HashRev(headerForHeight(blockHeight).value()) /* .blockHash */);
+                            BTC::HeaderHashRev(headerForHeight(blockHeight).value()) /* .blockHash */);
         } else {
             // try unconfirmed (mempool)
             auto [mempool, lock] = this->mempool();
