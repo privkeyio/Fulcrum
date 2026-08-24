@@ -2776,7 +2776,7 @@ void Storage::loadCheckHeadersInDB()
                 auto & bytes = hVec[i];
                 if (!verif(bytes, &err))
                     throw DatabaseFormatError(QString("%1. Possible databaase corruption. Delete the datadir and resynch.").arg(err));
-                bytes = BTC::Hash(bytes); // replace the header in the vector with its hash because it will be needed below...
+                bytes = BTC::HeaderHash(bytes); // replace the header in the vector with its hash because it will be needed below...
             }
         }
     }
@@ -4938,7 +4938,7 @@ std::vector<QByteArray> Storage::merkleCacheHelperFunc(unsigned int start, unsig
 {
     auto vec = headersFromHeight_nolock_nocheck(start, count, err); // despite the name of this function, it does take a small lock internally and is thread-safe. we cannot use the public one as that would potentially cause a deadlock here
     for (auto & ba : vec)
-        ba = BTC::Hash(ba);
+        ba = BTC::HeaderHash(ba); // block id: SHA256d for a v1 header, the BLAKE2b PoW hash for a v2 one
     return vec;
 }
 
