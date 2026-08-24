@@ -107,6 +107,8 @@ namespace {
     }
 
     /// Encapsulates the 'meta' db table
+    static constexpr int64_t kNoBlake2bHeightCached = std::numeric_limits<int64_t>::min();
+
     struct Meta {
         static constexpr uint32_t kCurrentVersion = 0x4u;
         static constexpr uint32_t kMinSupportedVersion = 0x1u;
@@ -1147,6 +1149,9 @@ namespace {
 
 struct Storage::Pvt
 {
+    /// -1 means "this chain has no v2 headers"; kNoBlake2bHeightCached means "not looked yet".
+    std::atomic_int64_t blake2bActivationHeightCache = kNoBlake2bHeightCached;
+
     Pvt(const unsigned cacheSizeBytes)
         : lruNum2Hash(std::max(unsigned(cacheSizeBytes*kLruNum2HashCacheMemoryWeight), 1u)),
           lruHeight2Hashes_BitcoindMemOrder(std::max(unsigned(cacheSizeBytes*kLruHeight2HashesCacheMemoryWeight), 1u))
@@ -2720,6 +2725,35 @@ auto Storage::headersFromHeight_nolock_nocheck(BlockHeight height, unsigned num,
         *err = "short header count returned from headers file";
 
     ret.shrink_to_fit();
+    return ret;
+}
+
+std::optional<BlockHeight> Storage::blake2bActivationHeight() const
+{
+    // The header layout switches once and never switches back, so "is v2" is monotonic in height
+    // and a binary search finds the boundary in ~log2(chain height) reads.
+    if (const auto cached = p->blake2bActivationHeightCache.load(std::memory_order_relaxed); cached != kNoBlake2bHeightCached)
+        return cached < 0 ? std::optional<BlockHeight>{} : std::optional<BlockHeight>{BlockHeight(cached)};
+
+    const int tip = latestTip().first;
+    std::optional<BlockHeight> ret;
+    if (tip >= 0) {
+        const auto isV2 = [this](BlockHeight h) {
+            const auto hdr = headerForHeight(h);
+            return hdr && BTC::IsHeaderV2(*hdr);
+        };
+        if (isV2(BlockHeight(tip))) {
+            BlockHeight lo = 0, hi = BlockHeight(tip); // lo may be v1, hi is v2
+            while (lo < hi) {
+                const BlockHeight mid = lo + (hi - lo) / 2u;
+                if (isV2(mid)) hi = mid;
+                else lo = mid + 1u;
+            }
+            ret = lo;
+        }
+        // Only cache once there is a chain to have looked at; an empty DB would cache "no fork" forever.
+        p->blake2bActivationHeightCache.store(ret ? int64_t(*ret) : int64_t{-1}, std::memory_order_relaxed);
+    }
     return ret;
 }
 

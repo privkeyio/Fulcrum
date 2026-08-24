@@ -411,6 +411,7 @@ private:
     void rpc_blockchain_headers_unsubscribe(Client *, RPC::BatchId, const RPC::Message &); // fully implemented
     void rpc_blockchain_header_get(Client *, RPC::BatchId, const RPC::Message &); // protocol v1.5.2
     void rpc_blockchain_relayfee(Client *, RPC::BatchId, const RPC::Message &); // fully implemented
+    void rpc_blockchain_pow_algorithms(Client *, RPC::BatchId, const RPC::Message &); // fully implemented
     // scripthash
     void rpc_blockchain_scripthash_get_balance(Client *, RPC::BatchId, const RPC::Message &); // fully implemented
     void rpc_blockchain_scripthash_get_first_use(Client *, RPC::BatchId, const RPC::Message &); // protocol v1.5.2

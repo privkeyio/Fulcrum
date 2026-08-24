@@ -130,6 +130,11 @@ public:
     /// since it uses the RocksDB MultiGet API. Does not throw.
     std::vector<Header> headersFromHeight(BlockHeight height, unsigned count, QString *err = nullptr) const;
 
+    /// The first height whose header uses the v2 (BLAKE2b) layout, or nothing if this chain has none.
+    /// Found by binary search over the stored headers -- the layout only switches once, at the fork's
+    /// activation height -- and cached after the first call. Thread safe.
+    std::optional<BlockHeight> blake2bActivationHeight() const;
+
     /// Convenience. Given a block height, return the block hash.
     std::optional<HeaderHash> hashForHeight(BlockHeight height, QString *err = nullptr) const;
 

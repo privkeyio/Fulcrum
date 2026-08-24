@@ -1561,6 +1561,21 @@ void Server::rpc_blockchain_relayfee(Client *c, const RPC::BatchId batchId, cons
     emit c->sendResult(batchId, m.id, bitcoindmgr->getBitcoinDInfo().relayFee);
 }
 
+void Server::rpc_blockchain_pow_algorithms(Client *c, const RPC::BatchId batchId, const RPC::Message &m)
+{
+    // A light client checks proof of work itself, so on a chain that changed algorithms it needs to know
+    // which one applies at which height -- it cannot infer that from the headers it is verifying.
+    // Ranges are returned oldest first and are half-open: each applies until the next one starts.
+    QVariantList ret;
+    const auto addRange = [&ret](quint32 fromHeight, const char *algorithm) {
+        ret.push_back(QVariantMap{{"from_height", fromHeight}, {"algorithm", QString(algorithm)}});
+    };
+    addRange(0u, "sha256d");
+    if (const auto activation = storage->blake2bActivationHeight())
+        addRange(quint32(*activation), "blake2b-v2");
+    emit c->sendResult(batchId, m.id, ret);
+}
+
 // ---- The below three methods are used by both the blockchain.scripthash.* and blockchain.address.* sets of methods
 //      below for boilerplate checking & parsing.
 HashX Server::parseFirstAddrParamToShCommon(const RPC::Message &m, QString *addrStrOut) const
@@ -2706,6 +2721,7 @@ HEY_COMPILER_PUT_STATIC_HERE(Server::StaticData::registry){
     { {"blockchain.headers.unsubscribe",    true,               false,    PR{0,0},                    },          MP(rpc_blockchain_headers_unsubscribe) },
     { {"blockchain.header.get",             true,               false,    PR{1,1},                    },          MP(rpc_blockchain_header_get) },
     { {"blockchain.relayfee",               true,               false,    PR{0,0},                    },          MP(rpc_blockchain_relayfee) },
+    { {"blockchain.pow_algorithms",         true,               false,    PR{0,0},                    },          MP(rpc_blockchain_pow_algorithms) },
 
     { {"blockchain.scripthash.get_balance", true,               false,    PR{1,2},                    },          MP(rpc_blockchain_scripthash_get_balance) },
     { {"blockchain.scripthash.get_first_use",  true,            false,    PR{1,1},                    },          MP(rpc_blockchain_scripthash_get_first_use) },
