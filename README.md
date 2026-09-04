@@ -1,3 +1,47 @@
+# Fulcrum with BLAKE2b proof of work
+
+This is an unofficial fork of [Fulcrum](https://github.com/cculianu/Fulcrum) that follows the BLAKE2b proof-of-work hardfork of Bitcoin. It is not affiliated with the Fulcrum project. Upstream has not adopted the fork, so use it instead if that is what you want.
+
+> **Not audited. Use at your own risk, and no warranty of any kind, see the [GPLv3 license](LICENSE.txt).** Everything below the divider is upstream's documentation and describes Fulcrum rather than this fork.
+
+## What differs from upstream
+
+- **BLAKE2b proof of work.** Parses the 164 byte v2 block header and takes its BLAKE2b hash as the block id. A header announces itself through the top bit of its version word, so no activation height is compiled in and nothing has to be configured per network.
+- **Variable-size headers throughout.** The indexer, the storage layer and the Electrum protocol handlers carry each header at its real length rather than assuming 80 bytes.
+- **Upstream's on-disk format is preserved.** The header table keeps upstream's 80 byte stride and magic, and the extra 84 bytes of a v2 header live in a separate `headers_v2` column family that is not created until such a header is seen. An index built by stock Fulcrum is read as-is with no reindex, and Bitcoin Cash and Litecoin databases are untouched.
+
+## Activation
+
+| Network | Height |
+| --- | --- |
+| mainnet | 961,640 |
+| testnet4 | 150,308 |
+
+These are the heights Bitcoin Knots activates at, listed for reference only. This fork keys off the header itself rather than a height, so it needs no updating if they change.
+
+## Building
+
+Unchanged from upstream, see [How To Compile](#how-to-compile) below. Clone this repository rather than upstream's:
+
+```bash
+git clone https://github.com/privkeyio/Fulcrum.git
+```
+
+## Releases
+
+Published under [Releases](https://github.com/privkeyio/Fulcrum/releases) with a signed shasums file covering every artifact:
+
+```bash
+gpg --verify Fulcrum-*-shasums.txt.asc Fulcrum-*-shasums.txt
+sha256sum -c Fulcrum-*-shasums.txt --ignore-missing
+```
+
+The signing key is `A47D 99B6 DB0D 715D 40C5 9A20 23AE 8A8E A7E2 4E38`.
+
+For StartOS, the packaged build lives at [privkeyio/fulcrum-startos](https://github.com/privkeyio/fulcrum-startos).
+
+---
+
 # ![Image FulcrumLogo](https://raw.githubusercontent.com/cculianu/Fulcrum-art/master/F-circle2_grn_64.png) Fulcrum
 
 [![Docker Build](https://github.com/cculianu/Fulcrum/actions/workflows/publish.yml/badge.svg)](https://github.com/cculianu/Fulcrum/actions/workflows/publish.yml)
