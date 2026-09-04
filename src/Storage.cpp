@@ -132,6 +132,9 @@ namespace {
             const uint64_t expected = marker->toULongLong(&ok);
             if (ok && fmt && fmt->magic == kCurrentHeadersMagic && fmt->nRecs == expected)
                 return HeadersTableState::StaleMarker;
+            // A chain with no headers at all: there is a window before the fresh array writes its metadata
+            // where the table reads as empty, and nothing was lost because there was nothing to lose.
+            if (ok && expected == 0 && !fmt) return HeadersTableState::StaleMarker;
             // The source records were held in memory, so an interrupted rewrite has nothing to resume from.
             return HeadersTableState::Unrecoverable;
         }
@@ -2785,6 +2788,7 @@ void Storage::convertSupersededHeadersIfNeeded()
         // Read the old array out in chunks, keeping the 80 byte legacy prefixes and sending the extended
         // headers' tails to their own table as we go. The prefixes have to be held because they are rewritten
         // into the very table they are read from.
+        BTC::HeaderVerifier verifier;
         constexpr size_t kChunk = 10000;
         for (uint64_t i = 0; i < nRecs; i += kChunk) {
             const size_t want = std::min<size_t>(kChunk, nRecs - i);
@@ -2795,6 +2799,14 @@ void Storage::convertSupersededHeadersIfNeeded()
             for (size_t j = 0; j < recs.size(); ++j) {
                 // Every record is padded out to 164 bytes; only an extended header actually uses the tail.
                 const QByteArray hdr = recs[j].left(qsizetype(BTC::GetBlockHeaderSize(recs[j])));
+                // Hash each reconstructed header against the next one's hashPrevBlock while the original table
+                // is still whole. A split that came out wrong breaks the chain here and throws, leaving the
+                // index exactly as it was found rather than destroying it and calling it corrupt afterwards.
+                if (QString err; !verifier(hdr, &err))
+                    throw DatabaseFormatError(QString("Block header %1 does not link onto the previous one after"
+                                                      " conversion, so the superseded index was not laid out as"
+                                                      " expected and has been left untouched: %2")
+                                                  .arg(i + j).arg(err));
                 prefixes += HeaderRecord(hdr);
                 if (const QByteArray tail = HeaderTail(hdr); !tail.isEmpty())
                     GenericBatchPut(tailBatch, headersV2ColumnFamily(), uint32_t(i + j), tail,
@@ -2817,6 +2829,11 @@ void Storage::convertSupersededHeadersIfNeeded()
     // same keys with the same values.
     if (const auto st = p->db->Write(p->db.defWriteOpts, &tailBatch); !st.ok())
         throw DatabaseError(QString("Error writing converted extended block header tails: %1").arg(StatusString(st)));
+
+    // From here until the rewrite is whole the only copy of the source records is the buffer above, so a
+    // signal must not be allowed to end the process. The 1.x upgrade path guards its own window the same way.
+    app()->setSignalsIgnored(true);
+    Defer restoreSignals([]{ app()->setSignalsIgnored(false); });
 
     // Empty the headers table so a fresh record array can stamp its own metadata onto it. The marker goes into
     // this same batch: until this write lands the original table is whole and nothing has been lost, and after
@@ -2861,15 +2878,19 @@ void Storage::convertSupersededHeadersIfNeeded()
         if (fresh.numRecords() != nRecs)
             throw InternalError(QString("Converted headers table holds %1 records, expected %2! FIXME!")
                                     .arg(fresh.numRecords()).arg(nRecs));
-        // Read the ends back through the record array rather than trusting the writes, before saying the table
-        // is whole. A rewrite that did not land as intended is still recoverable at this point.
-        for (const uint64_t rec : {uint64_t{0}, nRecs ? nRecs - 1 : uint64_t{0}}) {
-            if (!nRecs) break;
-            QString err;
-            const QByteArray got = fresh.readRecord(rec, &err);
-            if (got != prefixes.mid(qsizetype(rec * hdrSz), qsizetype(hdrSz)))
-                throw DatabaseError(QString("Converted block header %1 did not read back as written: %2")
-                                        .arg(rec).arg(err));
+        // Read back both ends of every chunk rather than trusting the writes. The chunk seams are where the
+        // record array's own metadata boundaries fall, so they are what a partial write would disturb.
+        for (uint64_t base = 0; base < nRecs; base += kWriteChunk) {
+            for (const uint64_t rec : {base, std::min(base + kWriteChunk, nRecs) - 1}) {
+                QString err;
+                const QByteArray got = fresh.readRecord(rec, &err);
+                const QByteArray want = prefixes.mid(qsizetype(rec * hdrSz), qsizetype(hdrSz));
+                if (got != want)
+                    throw DatabaseError(QString("Converted block header %1 did not read back as written"
+                                                " (got %2 bytes, expected %3)%4")
+                                            .arg(rec).arg(got.size()).arg(want.size())
+                                            .arg(err.isEmpty() ? QString{} : ": " + err));
+            }
         }
     }
 
@@ -2881,6 +2902,11 @@ void Storage::convertSupersededHeadersIfNeeded()
         if (const auto st = p->db->Write(p->db.defWriteOpts, &batch); !st.ok())
             throw DatabaseError(QString("Error clearing the conversion marker: %1").arg(StatusString(st)));
     }
+
+    // Nothing above used a synching write, so without this the whole conversion sits in an unsynced WAL and a
+    // power loss minutes later could roll the database back into the window the marker condemns.
+    if (const auto st = p->db->SyncWAL(); !st.ok())
+        Warning() << "Could not sync the WAL after converting the block headers: " << StatusString(st);
 
     Log() << "Converted " << nRecs << " block headers in " << t0.msecStr() << " msec";
 }
@@ -5874,7 +5900,9 @@ TEST_SUITE(headersconversion)
 TEST_CASE(classify_headers_table) {
     using SF = DBRecordArray::StoredFormat;
     const auto Fmt = [](uint32_t magic, uint64_t nRecs) {
-        return std::optional<SF>{SF{magic, kSupersededHeadersRecSz, 8, nRecs}};
+        const uint64_t recSz = magic == kSupersededHeadersMagic ? kSupersededHeadersRecSz
+                                                                : uint64_t(BTC::GetBlockHeaderSizeV1());
+        return std::optional<SF>{SF{magic, recSz, 8, nRecs}};
     };
     const auto Marker = [](const char *v) { return std::optional<QByteArray>{QByteArray{v}}; };
     constexpr auto kSup = kSupersededHeadersMagic, kCur = kCurrentHeadersMagic;
@@ -5899,13 +5927,28 @@ TEST_CASE(classify_headers_table) {
     TEST_CHECK(ClassifyHeadersTable(Marker("900000"), Fmt(kCur, 900'001)) == HeadersTableState::Unrecoverable);
     // Interrupted between the clear and the first chunk, so the table is empty.
     TEST_CHECK(ClassifyHeadersTable(Marker("900000"), noFmt) == HeadersTableState::Unrecoverable);
-    // Interrupted before the clear was durable: the old table survives, but the marker says otherwise, and the
-    // in-memory records are gone either way. Refuse rather than convert a table of unknown provenance.
+    // The clear and the marker go into one batch, so this pairing is not reachable; kept because accepting a
+    // table of unknown provenance would be the expensive way to be wrong.
     TEST_CHECK(ClassifyHeadersTable(Marker("900000"), Fmt(kSup, 900'000)) == HeadersTableState::Unrecoverable);
+    // A chain with no headers at all. The fresh array has not written its metadata yet, so the table reads as
+    // empty, but a conversion that set out to write nothing lost nothing.
+    TEST_CHECK(ClassifyHeadersTable(Marker("0"), noFmt) == HeadersTableState::StaleMarker);
+    TEST_CHECK(ClassifyHeadersTable(Marker("0"), Fmt(kCur, 0)) == HeadersTableState::StaleMarker);
+    // ... but an empty table is not a licence to accept a conversion that meant to write something.
+    TEST_CHECK(ClassifyHeadersTable(Marker("1"), noFmt) == HeadersTableState::Unrecoverable);
     // A marker that is not a number at all must never be read as a match.
     TEST_CHECK(ClassifyHeadersTable(Marker("1"), Fmt(kCur, 1)) == HeadersTableState::StaleMarker);
     TEST_CHECK(ClassifyHeadersTable(Marker(""), Fmt(kCur, 0)) == HeadersTableState::Unrecoverable);
     TEST_CHECK(ClassifyHeadersTable(Marker("garbage"), Fmt(kCur, 0)) == HeadersTableState::Unrecoverable);
+    // Qt trims surrounding whitespace when parsing, which costs nothing here: the count still has to match
+    // what the table actually holds, and this marker is only ever written as a bare number.
+    TEST_CHECK(ClassifyHeadersTable(Marker("  12 "), Fmt(kCur, 12)) == HeadersTableState::StaleMarker);
+    TEST_CHECK(ClassifyHeadersTable(Marker("  12 "), Fmt(kCur, 11)) == HeadersTableState::Unrecoverable);
+    // Larger than uint64 can hold: must not wrap into a match.
+    TEST_CHECK(ClassifyHeadersTable(Marker("99999999999999999999"), Fmt(kCur, 0)) == HeadersTableState::Unrecoverable);
+    // A magic belonging to neither format.
+    TEST_CHECK(ClassifyHeadersTable(Marker("5"), Fmt(0xdeadbeef, 5)) == HeadersTableState::Unrecoverable);
+    TEST_CHECK(ClassifyHeadersTable(noMarker, Fmt(0xdeadbeef, 5)) == HeadersTableState::Current);
 
     Log() << "ClassifyHeadersTable distinguishes a finished conversion from a truncated one";
 };

@@ -741,11 +741,16 @@ TEST_CASE(peek_stored_format) {
     rocksdb::ColumnFamilyOptions cfOpts;
     cfOpts.merge_operator.reset(new StorageDetail::ConcatOperator);
     rocksdb::ColumnFamilyHandle *empty{};
-    TEST_CHECK(db->CreateColumnFamily(cfOpts, "peek_empty", &empty).ok());
+    const auto cfSt = db->CreateColumnFamily(cfOpts, "peek_empty", &empty);
+    TEST_CHECK_MESSAGE(cfSt.ok(), cfSt.ToString());
+    if (!empty) throw Exception("Could not create the column family this test needs");
     TEST_CHECK(!DBRecordArray::peekStoredFormat(*db, *empty).has_value());
 
-    // A column family whose first row is not the metadata row is rejected rather than parsed as one.
+    // A first row that is not the metadata row at all is rejected rather than parsed as one.
     TEST_CHECK(db->Put({}, empty, rocksdb::Slice("\x01", 1), rocksdb::Slice("junk", 4)).ok());
+    TEST_CHECK_THROW(DBRecordArray::peekStoredFormat(*db, *empty), DBRecordArray::Error);
+    // ... and one in the right place that does not parse is rejected too, rather than read as zeroes.
+    TEST_CHECK(db->Put({}, empty, rocksdb::Slice(kMetaDataKey), rocksdb::Slice("short", 5)).ok());
     TEST_CHECK_THROW(DBRecordArray::peekStoredFormat(*db, *empty), DBRecordArray::Error);
 
     db->DestroyColumnFamilyHandle(empty);
