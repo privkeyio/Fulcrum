@@ -106,9 +106,38 @@ namespace {
     /// index is converted in place on open rather than being thrown away and rebuilt over several days.
     constexpr uint32_t kSupersededHeadersMagic = 0x00f026a2;
     constexpr uint64_t kSupersededHeadersRecSz = 164;
+    /// What the headers table has always been stamped with, upstream and here alike.
+    constexpr uint32_t kCurrentHeadersMagic = 0x00f026a1;
     /// Set for the duration of the conversion. Present at startup means the conversion did not finish, in which
     /// case the headers table no longer holds what it needs to be retried from.
     const QByteArray kHeaderConversionInProgressKey = QByteArrayLiteral("blake2b_header_conversion_in_progress");
+
+    /// What the headers table plus the conversion marker together say should happen on open.
+    enum class HeadersTableState {
+        Current,        ///< nothing to do: a fresh database, or one already in the current format
+        NeedsConversion,///< written by the superseded prerelease, and no conversion was interrupted
+        StaleMarker,    ///< converted all the way through, but the marker outlived it
+        Unrecoverable,  ///< interrupted after the original records were gone, leaving a short table
+    };
+
+    /// Kept separate from the database plumbing so every combination can be exercised in a unit test. `marker`
+    /// is the conversion marker's value if present, and holds the record count the conversion set out to
+    /// write; `fmt` is what the headers table's metadata row claims, or nullopt for an empty table.
+    HeadersTableState ClassifyHeadersTable(const std::optional<QByteArray> &marker,
+                                           const std::optional<DBRecordArray::StoredFormat> &fmt) {
+        if (marker) {
+            // The record array stamps the current magic on as soon as the first chunk lands, so the magic alone
+            // cannot tell a table that was fully rewritten from one that stopped partway. The count decides it.
+            bool ok{};
+            const uint64_t expected = marker->toULongLong(&ok);
+            if (ok && fmt && fmt->magic == kCurrentHeadersMagic && fmt->nRecs == expected)
+                return HeadersTableState::StaleMarker;
+            // The source records were held in memory, so an interrupted rewrite has nothing to resume from.
+            return HeadersTableState::Unrecoverable;
+        }
+        if (fmt && fmt->magic == kSupersededHeadersMagic) return HeadersTableState::NeedsConversion;
+        return HeadersTableState::Current;
+    }
 
     /// Encapsulates the 'meta' db table
     struct Meta {
@@ -2705,35 +2734,35 @@ auto Storage::headerForHeight_nolock(BlockHeight height, QString *err) const -> 
 
 void Storage::convertSupersededHeadersIfNeeded()
 {
-    const bool markerSet = GenericDBGet<QByteArray>(p->db.get(), p->db.meta,
-                                                    kHeaderConversionInProgressKey, true).has_value();
+    // The marker holds the record count the conversion set out to write, which is what distinguishes a rewrite
+    // that finished from one that stopped partway: the record array stamps the current magic onto the table as
+    // soon as the first chunk lands, so the magic alone cannot tell a whole table from a truncated one.
+    const auto marker = GenericDBGet<QByteArray>(p->db.get(), p->db.meta, kHeaderConversionInProgressKey, true);
     const auto fmt = DBRecordArray::peekStoredFormat(*p->db, *p->db.headers);
     // NB: everything in `fmt` is straight off the disk and unvalidated; only the record array's own constructor
     // checks it against the physical layout, so nothing here may size an allocation from it.
 
-    if (markerSet) {
-        // A conversion was interrupted. Which of its states we are in is decided by the headers table, not by
-        // the marker: the marker is written atomically with the destructive step and cleared once the rewrite
-        // is whole, so the source being intact means nothing was lost and it can simply be redone.
-        if (fmt && fmt->magic == kSupersededHeadersMagic) {
-            Log() << "A previous conversion of the block headers did not finish; the original table is intact,"
-                     " so it will be redone.";
-        } else if (fmt && fmt->magic == 0x00f026a1) {
-            Log() << "A previous conversion of the block headers finished but was not marked as such; clearing"
-                     " the marker.";
-            rocksdb::WriteBatch b;
-            b.Delete(p->db.meta, ToSlice(kHeaderConversionInProgressKey));
-            if (const auto st = p->db->Write(p->db.defWriteOpts, &b); !st.ok())
-                throw DatabaseError(QString("Error clearing the conversion marker: %1").arg(StatusString(st)));
-            return;
-        } else {
-            throw DatabaseFormatError("A previous attempt to convert this address index to the current block"
-                                      " header format left the headers table in a state it cannot be recovered"
-                                      " from. Delete the datadir and let it resync.");
-        }
+    switch (ClassifyHeadersTable(marker, fmt)) {
+    case HeadersTableState::Current:
+        return;
+    case HeadersTableState::StaleMarker: {
+        Log() << "A previous conversion of the block headers finished but was not marked as such; clearing"
+                 " the marker.";
+        rocksdb::WriteBatch b;
+        b.Delete(p->db.meta, ToSlice(kHeaderConversionInProgressKey));
+        if (const auto st = p->db->Write(p->db.defWriteOpts, &b); !st.ok())
+            throw DatabaseError(QString("Error clearing the conversion marker: %1").arg(StatusString(st)));
+        return;
     }
-
-    if (!fmt || fmt->magic != kSupersededHeadersMagic) return; // fresh db, or already in the current format
+    case HeadersTableState::Unrecoverable:
+        throw DatabaseFormatError(QString("A previous attempt to convert this address index to the current block"
+                                          " header format stopped partway, leaving %1 of %2 block headers."
+                                          " Delete the datadir and let it resync.")
+                                      .arg(fmt ? QString::number(fmt->nRecs) : QStringLiteral("no"),
+                                           marker ? QString::fromUtf8(*marker) : QStringLiteral("an unknown number of")));
+    case HeadersTableState::NeedsConversion:
+        break;
+    }
 
     if (fmt->recSz != kSupersededHeadersRecSz)
         throw DatabaseFormatError(QString("The headers table carries the superseded format's magic but a record"
@@ -2802,7 +2831,8 @@ void Storage::convertSupersededHeadersIfNeeded()
         // be mistaken for one that reached the end.
         if (const auto st = iter->status(); !st.ok())
             throw DatabaseError(QString("Error reading the headers table: %1").arg(StatusString(st)));
-        GenericBatchPut(clearBatch, p->db.meta, kHeaderConversionInProgressKey, QByteArray{"1"},
+        GenericBatchPut(clearBatch, p->db.meta, kHeaderConversionInProgressKey,
+                        QByteArray::number(qulonglong(nRecs)),
                         "Error marking the block header conversion as started");
         if (const auto st = p->db->Write(p->db.defWriteOpts, &clearBatch); !st.ok())
             throw DatabaseError(QString("Error clearing the superseded headers table: %1").arg(StatusString(st)));
@@ -2812,7 +2842,7 @@ void Storage::convertSupersededHeadersIfNeeded()
     {
         const size_t hdrSz = BTC::GetBlockHeaderSizeV1();
         const ByteView all{prefixes};
-        DBRecordArray fresh(*p->db, *p->db.headers, hdrSz, 8, 0x00f026a1);
+        DBRecordArray fresh(*p->db, *p->db.headers, hdrSz, 8, kCurrentHeadersMagic);
         constexpr uint64_t kWriteChunk = 50000;
         for (uint64_t base = 0; base < nRecs; base += kWriteChunk) {
             const uint64_t end = std::min(base + kWriteChunk, nRecs);
@@ -5837,6 +5867,51 @@ namespace {
 } // end anon namespace
 
 #ifdef ENABLE_TESTS
+#include "tests/Tests.h"
+
+TEST_SUITE(headersconversion)
+
+TEST_CASE(classify_headers_table) {
+    using SF = DBRecordArray::StoredFormat;
+    const auto Fmt = [](uint32_t magic, uint64_t nRecs) {
+        return std::optional<SF>{SF{magic, kSupersededHeadersRecSz, 8, nRecs}};
+    };
+    const auto Marker = [](const char *v) { return std::optional<QByteArray>{QByteArray{v}}; };
+    constexpr auto kSup = kSupersededHeadersMagic, kCur = kCurrentHeadersMagic;
+    const std::optional<QByteArray> noMarker;
+    const std::optional<SF> noFmt;
+
+    // No marker: decided purely by the magic on the table.
+    TEST_CHECK(ClassifyHeadersTable(noMarker, noFmt) == HeadersTableState::Current);            // fresh db
+    TEST_CHECK(ClassifyHeadersTable(noMarker, Fmt(kCur, 900'000)) == HeadersTableState::Current);
+    TEST_CHECK(ClassifyHeadersTable(noMarker, Fmt(kSup, 900'000)) == HeadersTableState::NeedsConversion);
+    // A crash before the destructive write leaves no marker at all, so it simply converts again.
+    TEST_CHECK(ClassifyHeadersTable(noMarker, Fmt(kSup, 0)) == HeadersTableState::NeedsConversion);
+
+    // Marker present and the table holds exactly what the conversion set out to write: it finished, and only
+    // the marker is stale.
+    TEST_CHECK(ClassifyHeadersTable(Marker("900000"), Fmt(kCur, 900'000)) == HeadersTableState::StaleMarker);
+
+    // Marker present but the count is short. This is the case the magic alone cannot see: the record array
+    // stamps the current magic on with the very first chunk, so a truncated table looks converted.
+    TEST_CHECK(ClassifyHeadersTable(Marker("900000"), Fmt(kCur, 899'999)) == HeadersTableState::Unrecoverable);
+    TEST_CHECK(ClassifyHeadersTable(Marker("900000"), Fmt(kCur, 0)) == HeadersTableState::Unrecoverable);
+    TEST_CHECK(ClassifyHeadersTable(Marker("900000"), Fmt(kCur, 900'001)) == HeadersTableState::Unrecoverable);
+    // Interrupted between the clear and the first chunk, so the table is empty.
+    TEST_CHECK(ClassifyHeadersTable(Marker("900000"), noFmt) == HeadersTableState::Unrecoverable);
+    // Interrupted before the clear was durable: the old table survives, but the marker says otherwise, and the
+    // in-memory records are gone either way. Refuse rather than convert a table of unknown provenance.
+    TEST_CHECK(ClassifyHeadersTable(Marker("900000"), Fmt(kSup, 900'000)) == HeadersTableState::Unrecoverable);
+    // A marker that is not a number at all must never be read as a match.
+    TEST_CHECK(ClassifyHeadersTable(Marker("1"), Fmt(kCur, 1)) == HeadersTableState::StaleMarker);
+    TEST_CHECK(ClassifyHeadersTable(Marker(""), Fmt(kCur, 0)) == HeadersTableState::Unrecoverable);
+    TEST_CHECK(ClassifyHeadersTable(Marker("garbage"), Fmt(kCur, 0)) == HeadersTableState::Unrecoverable);
+
+    Log() << "ClassifyHeadersTable distinguishes a finished conversion from a truncated one";
+};
+
+TEST_SUITE_END()
+
 #include "Storage/RecordFile.h"
 #include "ankerl/unordered_dense.h"
 namespace {
