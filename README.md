@@ -2,7 +2,7 @@
 
 This is an unofficial fork of [Fulcrum](https://github.com/cculianu/Fulcrum) that follows the BLAKE2b proof-of-work hardfork of Bitcoin. It is not affiliated with the Fulcrum project. Upstream has not adopted the fork, so use it instead if that is what you want.
 
-> **Not audited. Use at your own risk, and no warranty of any kind, see the [GPLv3 license](LICENSE.txt).** Everything below the divider is upstream's documentation and describes Fulcrum rather than this fork.
+> **Not reviewed by upstream.** It holds no keys and no funds, but wallets trust it for chain data, so a bug in header validation means they follow the wrong chain. Everything below the divider is upstream's documentation and describes Fulcrum rather than this fork.
 
 ## What differs from upstream
 
