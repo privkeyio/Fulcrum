@@ -2365,7 +2365,7 @@ void Storage::gentlyCloseDB()
     }
     p->db.columnFamilies.clear();
     // Clear members (they were all pointers owned by the p->db.columnFamilies array)
-    p->db.blkinfo = p->db.meta = p->db.shist = p->db.shunspent = p->db.rpa = p->db.txhash2txnum = p->db.undo = p->db.utxoset = p->db.txnum2txhash = p->db.headers = nullptr;
+    p->db.blkinfo = p->db.meta = p->db.shist = p->db.shunspent = p->db.rpa = p->db.txhash2txnum = p->db.undo = p->db.utxoset = p->db.txnum2txhash = p->db.headers = p->db.headersV2 = nullptr;
 
     // do SyncWAL() and Close() to gently close the DB
     auto name = DBName(p->db);
@@ -2705,12 +2705,34 @@ auto Storage::headerForHeight_nolock(BlockHeight height, QString *err) const -> 
 
 void Storage::convertSupersededHeadersIfNeeded()
 {
-    if (GenericDBGet<QByteArray>(p->db.get(), p->db.meta, kHeaderConversionInProgressKey, true).has_value())
-        throw DatabaseFormatError("A previous attempt to convert this address index to the current block header"
-                                  " format did not finish, so the index is incomplete and cannot be used."
-                                  " Delete the datadir and let it resync.");
-
+    const bool markerSet = GenericDBGet<QByteArray>(p->db.get(), p->db.meta,
+                                                    kHeaderConversionInProgressKey, true).has_value();
     const auto fmt = DBRecordArray::peekStoredFormat(*p->db, *p->db.headers);
+    // NB: everything in `fmt` is straight off the disk and unvalidated; only the record array's own constructor
+    // checks it against the physical layout, so nothing here may size an allocation from it.
+
+    if (markerSet) {
+        // A conversion was interrupted. Which of its states we are in is decided by the headers table, not by
+        // the marker: the marker is written atomically with the destructive step and cleared once the rewrite
+        // is whole, so the source being intact means nothing was lost and it can simply be redone.
+        if (fmt && fmt->magic == kSupersededHeadersMagic) {
+            Log() << "A previous conversion of the block headers did not finish; the original table is intact,"
+                     " so it will be redone.";
+        } else if (fmt && fmt->magic == 0x00f026a1) {
+            Log() << "A previous conversion of the block headers finished but was not marked as such; clearing"
+                     " the marker.";
+            rocksdb::WriteBatch b;
+            b.Delete(p->db.meta, ToSlice(kHeaderConversionInProgressKey));
+            if (const auto st = p->db->Write(p->db.defWriteOpts, &b); !st.ok())
+                throw DatabaseError(QString("Error clearing the conversion marker: %1").arg(StatusString(st)));
+            return;
+        } else {
+            throw DatabaseFormatError("A previous attempt to convert this address index to the current block"
+                                      " header format left the headers table in a state it cannot be recovered"
+                                      " from. Delete the datadir and let it resync.");
+        }
+    }
+
     if (!fmt || fmt->magic != kSupersededHeadersMagic) return; // fresh db, or already in the current format
 
     if (fmt->recSz != kSupersededHeadersRecSz)
@@ -2718,67 +2740,75 @@ void Storage::convertSupersededHeadersIfNeeded()
                                           " size of %1 rather than %2; refusing to guess at its layout.")
                                       .arg(fmt->recSz).arg(kSupersededHeadersRecSz));
 
-    const uint64_t nRecs = fmt->nRecs;
-    Log() << "The address index was written by a superseded build of this fork; converting " << nRecs
-          << " block headers to the current format. The index itself is kept, so this is not a resync.";
     const Tic t0;
-
-    // Read the old array out in chunks, keeping the 80 byte legacy prefixes and sending the v2 tails to their
-    // own table as we go. The prefixes have to be held because they are rewritten into the very table they are
-    // read from; at 80 bytes each that is well under a tenth of what the index this is converting occupies.
     QByteArray prefixes;
-    prefixes.reserve(qsizetype(nRecs * BTC::GetBlockHeaderSizeV1()));
+    uint64_t nRecs{};
     rocksdb::WriteBatch tailBatch;
     {
+        // Constructing this validates the metadata against what is physically on disk, so its record count is
+        // the first trustworthy one and the only one allowed to size the buffer below.
         DBRecordArray old(*p->db, *p->db.headers, kSupersededHeadersRecSz, 8, kSupersededHeadersMagic);
-        if (old.numRecords() != nRecs)
-            throw DatabaseFormatError(QString("The headers table says it holds %1 records but opened with %2.")
-                                          .arg(nRecs).arg(old.numRecords()));
+        nRecs = old.numRecords();
+        Log() << "The address index was written by a superseded build of this fork; converting " << nRecs
+              << " block headers to the current format. The index itself is kept, so this is not a resync.";
+        prefixes.reserve(qsizetype(nRecs * uint64_t(BTC::GetBlockHeaderSizeV1())));
+
+        // Read the old array out in chunks, keeping the 80 byte legacy prefixes and sending the extended
+        // headers' tails to their own table as we go. The prefixes have to be held because they are rewritten
+        // into the very table they are read from.
         constexpr size_t kChunk = 10000;
         for (uint64_t i = 0; i < nRecs; i += kChunk) {
+            const size_t want = std::min<size_t>(kChunk, nRecs - i);
             QString err;
-            const auto recs = old.readRecords(i, std::min<size_t>(kChunk, nRecs - i), &err);
-            if (recs.size() != std::min<size_t>(kChunk, nRecs - i))
+            const auto recs = old.readRecords(i, want, &err);
+            if (recs.size() != want)
                 throw DatabaseFormatError(QString("Failed to read block headers at height %1: %2").arg(i).arg(err));
             for (size_t j = 0; j < recs.size(); ++j) {
-                // Every record is padded out to 164 bytes; only a v2 header actually uses the tail.
+                // Every record is padded out to 164 bytes; only an extended header actually uses the tail.
                 const QByteArray hdr = recs[j].left(qsizetype(BTC::GetBlockHeaderSize(recs[j])));
                 prefixes += HeaderRecord(hdr);
                 if (const QByteArray tail = HeaderTail(hdr); !tail.isEmpty())
                     GenericBatchPut(tailBatch, headersV2ColumnFamily(), uint32_t(i + j), tail,
-                                    "Error writing a v2 block header tail");
+                                    "Error writing an extended block header tail");
             }
             // Flush as we go rather than letting the batch grow to the size of every tail in the chain.
             if (tailBatch.Count() >= 50000) {
                 if (const auto st = p->db->Write(p->db.defWriteOpts, &tailBatch); !st.ok())
-                    throw DatabaseError(QString("Error writing converted v2 block header tails: %1").arg(StatusString(st)));
+                    throw DatabaseError(QString("Error writing converted extended block header tails: %1")
+                                            .arg(StatusString(st)));
                 tailBatch.Clear();
             }
         }
     }
-    if (qsizetype(nRecs * BTC::GetBlockHeaderSizeV1()) != prefixes.size())
+    if (uint64_t(prefixes.size()) != nRecs * uint64_t(BTC::GetBlockHeaderSizeV1()))
         throw InternalError("Converted block header buffer came out the wrong size! FIXME!");
 
-    // The tails go in first. That table is keyed by height and is not read until the headers table names it, so
-    // writing it early is harmless, and it means the destructive step below is the only one that has to succeed.
-    GenericBatchPut(tailBatch, p->db.meta, kHeaderConversionInProgressKey, QByteArray{"1"},
-                    "Error marking the block header conversion as started");
+    // The tails go in first. That table is keyed by height and is not read until a header in the headers table
+    // says it has one, so writing it ahead of time is inert, and re-running the conversion just rewrites the
+    // same keys with the same values.
     if (const auto st = p->db->Write(p->db.defWriteOpts, &tailBatch); !st.ok())
-        throw DatabaseError(QString("Error writing the converted v2 block header tails: %1").arg(StatusString(st)));
+        throw DatabaseError(QString("Error writing converted extended block header tails: %1").arg(StatusString(st)));
 
-    // Empty the headers table so a fresh record array can stamp its own metadata onto it.
+    // Empty the headers table so a fresh record array can stamp its own metadata onto it. The marker goes into
+    // this same batch: until this write lands the original table is whole and nothing has been lost, and after
+    // it lands the marker is there to say so.
     {
         rocksdb::WriteBatch clearBatch;
         std::unique_ptr<rocksdb::Iterator> iter{p->db->NewIterator(p->db.defReadOpts, p->db.headers)};
+        if (!iter) throw DatabaseError("Failed to obtain an iterator over the headers table");
         for (iter->SeekToFirst(); iter->Valid(); iter->Next())
             clearBatch.Delete(p->db.headers, iter->key());
+        // A partial pass here would commit a half-cleared table, so an iteration that stopped short must not
+        // be mistaken for one that reached the end.
+        if (const auto st = iter->status(); !st.ok())
+            throw DatabaseError(QString("Error reading the headers table: %1").arg(StatusString(st)));
+        GenericBatchPut(clearBatch, p->db.meta, kHeaderConversionInProgressKey, QByteArray{"1"},
+                        "Error marking the block header conversion as started");
         if (const auto st = p->db->Write(p->db.defWriteOpts, &clearBatch); !st.ok())
             throw DatabaseError(QString("Error clearing the superseded headers table: %1").arg(StatusString(st)));
     }
 
-    // Rewrite it in the current format. Written in chunks so the batch never grows to the size of the whole
-    // headers table; each chunk carries its own metadata update, so an interruption leaves a shorter but
-    // self-consistent array, which the marker below turns into a clear error rather than silent truncation.
+    // Rewrite it in the current format, in chunks so the batch never grows to the size of the whole table.
     {
         const size_t hdrSz = BTC::GetBlockHeaderSizeV1();
         const ByteView all{prefixes};
@@ -2801,9 +2831,20 @@ void Storage::convertSupersededHeadersIfNeeded()
         if (fresh.numRecords() != nRecs)
             throw InternalError(QString("Converted headers table holds %1 records, expected %2! FIXME!")
                                     .arg(fresh.numRecords()).arg(nRecs));
+        // Read the ends back through the record array rather than trusting the writes, before saying the table
+        // is whole. A rewrite that did not land as intended is still recoverable at this point.
+        for (const uint64_t rec : {uint64_t{0}, nRecs ? nRecs - 1 : uint64_t{0}}) {
+            if (!nRecs) break;
+            QString err;
+            const QByteArray got = fresh.readRecord(rec, &err);
+            if (got != prefixes.mid(qsizetype(rec * hdrSz), qsizetype(hdrSz)))
+                throw DatabaseError(QString("Converted block header %1 did not read back as written: %2")
+                                        .arg(rec).arg(err));
+        }
     }
 
-    // Only now is the index whole again.
+    // Only now is the index whole again. A crash before this leaves the marker set with the table already in
+    // the current format, which the startup path above recognises and clears rather than condemning.
     {
         rocksdb::WriteBatch batch;
         batch.Delete(p->db.meta, ToSlice(kHeaderConversionInProgressKey));

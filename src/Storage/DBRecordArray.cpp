@@ -718,5 +718,39 @@ TEST_CASE(exceptions) {
     TEST_CHECK(bucketSize2 == BUCKET_SIZE);
 };
 
+TEST_CASE(peek_stored_format) {
+    // peekStoredFormat exists so a caller can tell an array written in an older format apart from a current
+    // one *before* constructing, since the constructor throws on a mismatch and stamps fresh metadata onto an
+    // empty column family. Both of those make "just try it and catch" unusable, so the branches matter.
+    dba.reset();
+    Defer d([&]{ dba.emplace(*db, *cf, HashLen, BUCKET_SIZE); });
+
+    // A populated column family reports what it actually holds.
+    const auto fmt = DBRecordArray::peekStoredFormat(*db, *cf);
+    TEST_CHECK(fmt.has_value());
+    TEST_CHECK(fmt->recSz == HashLen);
+    TEST_CHECK(fmt->bucketNRecs == BUCKET_SIZE);
+    TEST_CHECK(fmt->nRecs == DBRecordArray(*db, *cf, HashLen, BUCKET_SIZE).numRecords());
+    // ... including a magic the caller does not expect, which is the whole point: reporting it rather than
+    // throwing is what lets a migration recognise its own older format.
+    TEST_CHECK(fmt->magic == 0x002367f0u);
+    TEST_CHECK_THROW(DBRecordArray(*db, *cf, HashLen, BUCKET_SIZE, 0x00f026a2), DBRecordArray::Error);
+
+    // An empty column family reports nothing rather than a zeroed struct, so a fresh database is not mistaken
+    // for one written in some other format.
+    rocksdb::ColumnFamilyOptions cfOpts;
+    cfOpts.merge_operator.reset(new StorageDetail::ConcatOperator);
+    rocksdb::ColumnFamilyHandle *empty{};
+    TEST_CHECK(db->CreateColumnFamily(cfOpts, "peek_empty", &empty).ok());
+    TEST_CHECK(!DBRecordArray::peekStoredFormat(*db, *empty).has_value());
+
+    // A column family whose first row is not the metadata row is rejected rather than parsed as one.
+    TEST_CHECK(db->Put({}, empty, rocksdb::Slice("\x01", 1), rocksdb::Slice("junk", 4)).ok());
+    TEST_CHECK_THROW(DBRecordArray::peekStoredFormat(*db, *empty), DBRecordArray::Error);
+
+    db->DestroyColumnFamilyHandle(empty);
+    Log() << "peekStoredFormat reports a populated array, an empty column family, and a malformed first row";
+};
+
 TEST_SUITE_END()
 #endif
