@@ -535,6 +535,10 @@ private:
     /// its database stays readable by a build without this support.
     rocksdb::ColumnFamilyHandle *headersV2ColumnFamily();
 
+    /// Converts an index written by a superseded prerelease of this fork, whose headers table used a 164 byte
+    /// record, into the current format. A no-op for every other database. Called before the headers record array
+    /// is opened, since that would otherwise throw on the magic bytes.
+    void convertSupersededHeadersIfNeeded();
     /// thread-safe helper that returns hashed headers starting from start up until count (hashes are in bitcoin memory order)
     std::vector<QByteArray> merkleCacheHelperFunc(unsigned start, unsigned count, QString *err);
 

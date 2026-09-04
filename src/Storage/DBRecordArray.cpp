@@ -118,6 +118,22 @@ QString DBRecordArray::name() const
     return QFileInfo(QString::fromStdString(db.GetName())).fileName() + "/" + QString::fromStdString(cf.GetName());
 }
 
+std::optional<DBRecordArray::StoredFormat>
+DBRecordArray::peekStoredFormat(rocksdb::DB &db, rocksdb::ColumnFamilyHandle &cf)
+{
+    std::unique_ptr<rocksdb::Iterator> iter{db.NewIterator(rocksdb::ReadOptions{}, &cf)};
+    if (!iter) throw Error(QString("%1: got a null iterator from db.NewIterator()!").arg(__func__));
+    iter->SeekToFirst();
+    if (!iter->Valid()) return std::nullopt; // empty column family, nothing written yet
+    if (iter->key().compare(kMetaDataKey) != 0)
+        throw Error(QString("%1: first row must be the metadata entry!").arg(__func__));
+    MetaData meta;
+    std::string err;
+    if (!meta.fromBytes(iter->value(), &err))
+        throw Error(QString("%1: could not parse the metadata entry: %2").arg(__func__, QString::fromStdString(err)));
+    return StoredFormat{meta.magic, meta.recSz, meta.bucketNRecs, meta.nRecs};
+}
+
 void DBRecordArray::readOrInitMeta()
 {
     const QString dbName = name();

@@ -89,6 +89,16 @@ public:
 
     QString name() const;
 
+    /// What a column family's metadata row says it holds. Lets a caller tell an array written in some older
+    /// format apart from a new one before constructing, since the constructor throws on any mismatch and
+    /// stamps a fresh metadata row onto an empty column family. Returns nullopt if the column family is
+    /// empty, i.e. nothing has been written to it yet.
+    struct StoredFormat {
+        uint32_t magic{};
+        uint64_t recSz{}, bucketNRecs{}, nRecs{};
+    };
+    static std::optional<StoredFormat> peekStoredFormat(rocksdb::DB &db, rocksdb::ColumnFamilyHandle &cf) noexcept(false);
+
     size_t recordSize() const { return recSz; }
     uint32_t magicBytes() const { return magic; }
     size_t bucketNumRecords() const { return bucketNRecs; } // number of records per bucket
