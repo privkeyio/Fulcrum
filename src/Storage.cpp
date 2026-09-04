@@ -2777,10 +2777,14 @@ void Storage::convertSupersededHeadersIfNeeded()
     uint64_t nRecs{};
     rocksdb::WriteBatch tailBatch;
     {
-        // Constructing this validates the metadata against what is physically on disk, so its record count is
-        // the first trustworthy one and the only one allowed to size the buffer below.
+        // Constructing this checks the metadata row against the last bucket on disk, but not against the ones
+        // in between, so a row claiming a billion records passes. Bound it the way the rest of the header
+        // handling does before it is allowed to size anything.
         DBRecordArray old(*p->db, *p->db.headers, kSupersededHeadersRecSz, 8, kSupersededHeadersMagic);
         nRecs = old.numRecords();
+        if (nRecs > MAX_HEADERS)
+            throw DatabaseFormatError(QString("The headers table claims %1 block headers, beyond the %2 this"
+                                              " supports; refusing to read it.").arg(nRecs).arg(MAX_HEADERS));
         Log() << "The address index was written by a superseded build of this fork; converting " << nRecs
               << " block headers to the current format. The index itself is kept, so this is not a resync.";
         prefixes.reserve(qsizetype(nRecs * uint64_t(BTC::GetBlockHeaderSizeV1())));
@@ -2932,6 +2936,11 @@ void Storage::appendHeaderTailIfV2(Header &record, BlockHeight height) const
 {
     if (!BTC::IsHeaderV2(record))
         return; // legacy header, and the only case on a chain without the hardfork
+    if (!p->db.headersV2)
+        // The table is only created once an extended header is seen, so a record asking for a tail on a chain
+        // that never activated the hardfork is a corrupt record rather than a missing table.
+        throw DatabaseFormatError(QString("Block header %1 is marked as an extended header, but this chain has"
+                                          " no extended headers; the record is corrupt.").arg(height));
     auto opt = GenericDBGet<QByteArray>(p->db.get(), p->db.headersV2, uint32_t(height), false,
                                         QString("Error reading extended header %1 from db").arg(height), true);
     record += *opt;
