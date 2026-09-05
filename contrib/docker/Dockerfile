@@ -16,8 +16,8 @@ COPY . .
 
 # The build context is a submodule checkout, whose .git is a file pointing outside it, so the .pro
 # file cannot derive the commit itself and the binary would report an empty one. The caller passes it.
-ARG GIT_COMMIT
-ENV GIT_COMMIT=$GIT_COMMIT
+ARG FULCRUM_GIT_COMMIT
+ENV FULCRUM_GIT_COMMIT=$FULCRUM_GIT_COMMIT
 
 RUN qmake6 -makefile PREFIX=/usr Fulcrum.pro && \
     make $MAKEFLAGS install

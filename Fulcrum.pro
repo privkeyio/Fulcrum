@@ -155,8 +155,9 @@ contains(CONFIG, config_builtin_bswap) {
 # Handle or add GIT_COMMIT=
 !contains(DEFINES, GIT_COMMIT.*) {
     # A container build has no usable .git of its own -- a submodule's is a file pointing outside the
-    # build context -- so let the caller hand us the commit through the environment instead.
-    GIT_COMMIT_FROM_ENV = $$(GIT_COMMIT)
+    # build context -- so let the caller hand us the commit through the environment instead. The name is
+    # specific because CI systems commonly export a bare GIT_COMMIT of their own.
+    GIT_COMMIT_FROM_ENV = $$(FULCRUM_GIT_COMMIT)
     !isEmpty(GIT_COMMIT_FROM_ENV) {
         DEFINES += GIT_COMMIT="\\\"$$GIT_COMMIT_FROM_ENV\\\""
     } else:unix {
