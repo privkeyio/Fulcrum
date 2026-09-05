@@ -154,7 +154,12 @@ contains(CONFIG, config_builtin_bswap) {
 
 # Handle or add GIT_COMMIT=
 !contains(DEFINES, GIT_COMMIT.*) {
-    unix {
+    # A container build has no usable .git of its own -- a submodule's is a file pointing outside the
+    # build context -- so let the caller hand us the commit through the environment instead.
+    GIT_COMMIT_FROM_ENV = $$(GIT_COMMIT)
+    !isEmpty(GIT_COMMIT_FROM_ENV) {
+        DEFINES += GIT_COMMIT="\\\"$$GIT_COMMIT_FROM_ENV\\\""
+    } else:unix {
         exists( $$_PRO_FILE_PWD_/.git ) {  # If we have a .git directory at the top level
             system( git --version > /dev/null ) {  # And `git` is a valid command...
                 # Then we define the git commit we are compiling against
