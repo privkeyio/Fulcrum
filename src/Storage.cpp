@@ -2944,6 +2944,10 @@ void Storage::appendHeaderTailIfV2(Header &record, BlockHeight height) const
     auto opt = GenericDBGet<QByteArray>(p->db.get(), p->db.headersV2, uint32_t(height), false,
                                         QString("Error reading extended header %1 from db").arg(height), true);
     record += *opt;
+    // Every caller goes on to hash or serialize this, and a short one would throw somewhere less obvious.
+    if (!BTC::IsHeaderSizeOk(record))
+        throw DatabaseFormatError(QString("Block header %1 came to %2 bytes once its tail was appended, which is"
+                                          " not a valid header size.").arg(height).arg(record.size()));
 }
 
 auto Storage::headersFromHeight_nolock_nocheck(BlockHeight height, unsigned num, QString *err) const -> std::vector<Header>

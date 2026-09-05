@@ -176,4 +176,35 @@ TEST_CASE(header_v1_unchanged) {
     TEST_CHECK_EQUAL(toHex(BTC::Serialize(nulled)), QString(serialized));
 };
 
+TEST_CASE(header_hash_dispatch) {
+    // BTC::HeaderHash is what the rest of the server calls to turn a stored header into a block id, and it
+    // has to pick the algorithm from the header itself. Getting it wrong is silent: the wrong hash is still
+    // 32 bytes, so it surfaces only later as a merkle root that does not verify.
+    const QByteArray v1 = hexToBytes(
+        "0100000050120119172a610421a6c3011dd330d9df07b63616c2cc1f1cd002000000000"
+        "06657a9252aacd5c0b2940996ecff952228c3067cc38d4885efb5a4ac4247e9f337221b"
+        "4d4c86041b0f2b5710");
+    TEST_CHECK_EQUAL(v1.size(), int(bitcoin::CBlockHeader::V1_SIZE));
+    TEST_CHECK(!BTC::IsHeaderV2(v1));
+    // For a legacy header it must agree exactly with plain sha256d, or every pre-fork block id would change.
+    TEST_CHECK_EQUAL(BTC::HeaderHash(v1), BTC::Hash(v1));
+    TEST_CHECK_EQUAL(toHex(BTC::HeaderHashRev(v1)),
+                     QString("000000000003ba27aa200b1cecaad478d2b00432346c3f1f3986da1afd33e506"));
+
+    // For an extended header it must not be sha256d of the bytes, which is exactly the bug this guards.
+    const QByteArray v2 = hexToBytes(v2Vectors[0].serialized);
+    TEST_CHECK_EQUAL(v2.size(), int(bitcoin::CBlockHeader::V2_SIZE));
+    TEST_CHECK(BTC::IsHeaderV2(v2));
+    TEST_CHECK(BTC::HeaderHash(v2) != BTC::Hash(v2));
+    TEST_CHECK_EQUAL(toHex(BTC::HeaderHashRev(v2)), QString(v2Vectors[0].blockHash));
+
+    // A buffer flagged as extended but too short to be one must not be read past its end.
+    const QByteArray truncated = v2.left(int(bitcoin::CBlockHeader::V1_SIZE));
+    TEST_CHECK(BTC::IsHeaderV2(truncated));
+    TEST_CHECK(!BTC::IsHeaderSizeOk(truncated));
+    TEST_CHECK_THROW(BTC::HeaderHash(truncated), std::exception);
+
+    Log() << "HeaderHash dispatches on the header, and refuses one flagged extended that is not";
+};
+
 TEST_SUITE_END()
