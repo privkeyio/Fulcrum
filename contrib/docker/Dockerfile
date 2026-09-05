@@ -14,7 +14,15 @@ WORKDIR /src
 
 COPY . .
 
-RUN qmake6 -makefile PREFIX=/usr Fulcrum.pro && \
+# The build context is a submodule checkout, whose .git is a file pointing outside it, so the .pro
+# file cannot derive the commit itself and the binary would report an empty one. The caller passes it.
+ARG GIT_COMMIT
+
+RUN if [ -n "$GIT_COMMIT" ]; then \
+        qmake6 -makefile PREFIX=/usr "DEFINES+=GIT_COMMIT=\\\"$GIT_COMMIT\\\"" Fulcrum.pro; \
+    else \
+        qmake6 -makefile PREFIX=/usr Fulcrum.pro; \
+    fi && \
     make $MAKEFLAGS install
 
 FROM debian:13.1-slim
