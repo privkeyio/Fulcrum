@@ -227,7 +227,8 @@ namespace {
                 version = Version::BitcoinDCompact(val);
             isBchd = true;
         } else {
-            isCore = subversion.startsWith("/Satoshi:"); // this matches Bitcoin Knots as well
+            isCore = subversion.startsWith("/Satoshi:") // this matches Bitcoin Knots as well
+                     || subversion.startsWith("/OracleKnots:"); // Oracle Knots (BLAKE2b sovereign fork) reports /OracleKnots:...
             isBU = subversion.startsWith("/BCH Unlimited:");
             isBCHN = subversion.startsWith("/Bitcoin Cash Node:");
             isLTC = subversion.startsWith("/LitecoinCore:");
