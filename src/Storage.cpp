@@ -1789,6 +1789,9 @@ bool Storage::checkFulc1xUpgradeDB()
     const bool hasAllFulcrum1DBElements = [&] {
         // check if all of the recordfiles and db dirs exist
         for (const auto & [name, params] : p->db.colFamsTable) {
+            // A table that is created on demand has no counterpart in a 1.x datadir, so requiring one here
+            // would make every 1.x database look incomplete and silently resync instead of upgrading.
+            if (params.optional) continue;
             if (params.dra) { // old 1.x format for this item is a RecordFile, check the file exists
                 QFileInfo info(dataDirPrefix + QString::fromStdString(name));
                 if (!info.exists() || !info.isFile())
@@ -1937,6 +1940,7 @@ bool Storage::checkFulc1xUpgradeDB()
     std::optional<std::vector<QByteArray>> shortBlockHashes; // calculated for us as we import `headers` and used by the rpa table import
 
     for (const auto & [sname, info] : p->db.colFamsTable) {
+        if (info.optional) continue; // nothing to import: no 1.x datadir has one, and its handle may be null
         const auto name = QString::fromStdString(sname);
         const auto fname = dataDirPrefix + name;
         if (!info.dra) {
