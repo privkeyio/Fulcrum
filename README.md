@@ -1,6 +1,6 @@
 # Fulcrum with BLAKE2b proof of work
 
-This is an unofficial fork of [Fulcrum](https://github.com/cculianu/Fulcrum) that follows the BLAKE2b proof-of-work hardfork of Bitcoin. It is not affiliated with the Fulcrum project. Upstream has not adopted the fork, so use it instead if that is what you want.
+This is an unofficial fork of [Fulcrum](https://github.com/cculianu/Fulcrum) that follows Bitcoin's change of proof-of-work algorithm to BLAKE2b. It is not affiliated with the Fulcrum project. Upstream has not adopted the fork, so use it instead if that is what you want.
 
 > **Not reviewed by upstream.** It holds no keys and no funds, but wallets trust it for chain data, so a bug in header validation means they follow the wrong chain. Everything below the divider is upstream's documentation and describes Fulcrum rather than this fork.
 

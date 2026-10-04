@@ -528,10 +528,10 @@ private:
     std::vector<Header> headersFromHeight_nolock_nocheck(BlockHeight height, unsigned count, QString *errMsg = nullptr) const;
     /// A header record holds the first 80 bytes. If those say the header is the extended (BLAKE2b) form, this
     /// appends its 84-byte tail from the `headers_v2` table. A no-op for legacy headers, which is every header
-    /// on a chain that has not activated the hardfork.
+    /// before the proof of work changes.
     void appendHeaderTailIfV2(Header &record, BlockHeight height) const;
     /// Creates the `headers_v2` table if it does not exist yet, and returns its handle. Called the first time
-    /// an extended header is written, so a chain that never activates the hardfork never gains the table and
+    /// an extended header is written, so a chain whose proof of work never changes never gains the table and
     /// its database stays readable by a build without this support.
     rocksdb::ColumnFamilyHandle *headersV2ColumnFamily();
 
@@ -588,7 +588,7 @@ RocksDB: "headers_v2"
   Purpose:  The 84-byte tail of each extended (BLAKE2b) header, whose first 80 bytes are in "headers" above.
   Key: Block height (uint32)
   Data layout: The raw 84 bytes.
-  Note: Created on first use rather than up front, so a chain that never activates the hardfork never contains
+  Note: Created on first use rather than up front, so a chain whose proof of work never changes never contains
         this table and stays readable by a build that does not know about it.
 
 RocksDB: "txnum2txhash" √
