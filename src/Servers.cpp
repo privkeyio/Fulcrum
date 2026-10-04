@@ -1382,7 +1382,7 @@ void Server::rpc_blockchain_block_headers(Client *c, const RPC::BatchId batchId,
             resp["headers"] = headers;
         } else {
             // Protocol version < 1.6.0, return a concatenated string of header hex. Note that with the BLAKE2b
-            // hardfork headers are no longer all the same size, so this blob must be split by reading each
+            // past the activation headers are no longer all the same size, so this blob must be split by reading each
             // header's version field, rather than at a fixed stride.
             size_t totalHexSz = 0;
             for (size_t i = 0; i < nHdrs; ++i) totalHexSz += size_t(getHeaderAndCheckSize(i).size()) * 2u;

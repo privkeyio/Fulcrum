@@ -90,11 +90,11 @@ UndoInfoMissing::~UndoInfoMissing() {} // weak vtable warning suppression
 HistoryTooLarge::~HistoryTooLarge() {} // weak vtable warning suppression
 
 namespace {
-    /// Headers live in a fixed-stride record array of 80-byte records. With the BLAKE2b hardfork a header may
+    /// Headers live in a fixed-stride record array of 80-byte records. Once the proof of work changes to BLAKE2b a header may
     /// be 164 bytes, but its first 80 bytes are exactly the legacy field layout, so the record array is left
     /// alone and only the 84-byte tail goes elsewhere, in the "headers_v2" column family keyed by height.
     ///
-    /// A chain that never activates the hardfork therefore writes and reads precisely what it always did: the
+    /// A chain whose proof of work never changes therefore writes and reads precisely what it always did: the
     /// record size and magic are unchanged, the extra column family is never created, and no reindex or
     /// migration is needed on upgrade.
     QByteArray HeaderRecord(const QByteArray &hdr) { return hdr.left(BTC::GetBlockHeaderSizeV1()); }
@@ -2932,17 +2932,17 @@ rocksdb::ColumnFamilyHandle *Storage::headersV2ColumnFamily()
         throw DatabaseError(QString("Error creating the headers_v2 column family: %1").arg(StatusString(s)));
     p->db.columnFamilies.push_back(h);
     it->second.handle = h;
-    Log() << "Created the headers_v2 table; this chain has activated the BLAKE2b hardfork";
+    Log() << "Created the headers_v2 table; the proof of work has changed to BLAKE2b";
     return h;
 }
 
 void Storage::appendHeaderTailIfV2(Header &record, BlockHeight height) const
 {
     if (!BTC::IsHeaderV2(record))
-        return; // legacy header, and the only case on a chain without the hardfork
+        return; // legacy header, and the only case before the proof of work changes
     if (!p->db.headersV2)
         // The table is only created once an extended header is seen, so a record asking for a tail on a chain
-        // that never activated the hardfork is a corrupt record rather than a missing table.
+        // whose proof of work never changed is a corrupt record rather than a missing table.
         throw DatabaseFormatError(QString("Block header %1 is marked as an extended header, but this chain has"
                                           " no extended headers; the record is corrupt.").arg(height));
     auto opt = GenericDBGet<QByteArray>(p->db.get(), p->db.headersV2, uint32_t(height), false,
