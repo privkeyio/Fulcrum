@@ -9,6 +9,11 @@ on:
       - 'contrib/docker/**'
       - '.github/workflows/ghcr.yml'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to also apply, with latest, when publishing a release whose tagged commit predates this workflow
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -136,8 +141,8 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=raw,value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
+            type=raw,value=${{ github.event.release.tag_name || inputs.tag }},enable=${{ github.event_name == 'release' || inputs.tag != '' }}
+            type=raw,value=latest,enable=${{ (github.event_name == 'release' && !github.event.release.prerelease) || inputs.tag != '' }}
             type=sha,format=short
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
