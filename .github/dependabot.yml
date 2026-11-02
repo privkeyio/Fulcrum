@@ -4,3 +4,9 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    exclude-paths:
+      - .github/workflows/publish.yml
+      - .github/workflows/prereleases.yaml
+    groups:
+      all:
+        patterns: ["*"]
